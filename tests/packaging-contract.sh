@@ -53,8 +53,8 @@ expect_command_status() {
   fi
 }
 
-expect_file_line 'config version is exactly 0.5.0' \
-  '^version:[[:space:]]*"0\.5\.0"[[:space:]]*$' hindsight/config.yaml
+expect_file_line 'config version is exactly 0.5.1' \
+  '^version:[[:space:]]*"0\.5\.1"[[:space:]]*$' hindsight/config.yaml
 expect_file_line 'config uses the generic GHCR image' \
   '^image:[[:space:]]*"ghcr\.io/bonzanni/hindsight"[[:space:]]*$' hindsight/config.yaml
 expect_absent 'config does not restate the default startup mode' \

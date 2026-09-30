@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.1
+
+Silence upstream's "HINDSIGHT_API_WORKER_ID is not set" startup warning by
+pinning the worker id explicitly. Upstream warns because in plain Docker the
+fallback container hostname changes on recreation, which would strand
+background tasks. Under Home Assistant the hostname is derived from the add-on
+slug and is already stable, so the add-on now sets the worker id to exactly
+that value. Behavior is unchanged: the id stays identical to the one earlier
+versions used, so no in-flight consolidation or retain task is orphaned by
+updating.
+
 ## 0.5.0
 
 Update Hindsight from upstream v0.7.1 to v0.10.2. This spans three upstream
