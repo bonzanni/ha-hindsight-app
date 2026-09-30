@@ -53,8 +53,8 @@ expect_command_status() {
   fi
 }
 
-expect_file_line 'config version is exactly 0.4.2' \
-  '^version:[[:space:]]*"0\.4\.2"[[:space:]]*$' hindsight/config.yaml
+expect_file_line 'config version is exactly 0.5.0' \
+  '^version:[[:space:]]*"0\.5\.0"[[:space:]]*$' hindsight/config.yaml
 expect_file_line 'config uses the generic GHCR image' \
   '^image:[[:space:]]*"ghcr\.io/bonzanni/hindsight"[[:space:]]*$' hindsight/config.yaml
 expect_absent 'config does not restate the default startup mode' \
@@ -85,9 +85,13 @@ fi
 expect_file_line 'Dockerfile keeps the dated trixie base pin' \
   '^ARG BUILD_FROM=ghcr\.io/home-assistant/base-debian:trixie-2026\.05\.0$' hindsight/Dockerfile
 expect_file_line 'Dockerfile keeps the upstream digest pin' \
-  '^ARG HINDSIGHT_IMAGE=ghcr\.io/vectorize-io/hindsight@sha256:e82b2c051784affa73243108c06402655043999e362bb3b7226b4da1000e1660$' hindsight/Dockerfile
+  '^ARG HINDSIGHT_IMAGE=ghcr\.io/vectorize-io/hindsight@sha256:d1840062a5b79940ab7a9f4809ceb90fc776d4ad737cd9329e9b5836cc64ab70$' hindsight/Dockerfile
 expect_file_line 'Dockerfile keeps the upstream source lockstep ref' \
-  '^ARG HINDSIGHT_REF=779e3140c8faeb3d6662e64bff7b908e9e29c989$' hindsight/Dockerfile
+  '^ARG HINDSIGHT_REF=5fc4ce20917b916240cef27c212c387a177f115b$' hindsight/Dockerfile
+expect_file_line 'Dockerfile bounds the recall admission queue under the consumer budget' \
+  '^    HINDSIGHT_API_ADMISSION_RECALL_MAX_WAIT_MS=1000 \\$' hindsight/Dockerfile
+expect_file_line 'Dockerfile keeps the 18s recall handler deadline' \
+  '^    HINDSIGHT_API_RECALL_HANDLER_TIMEOUT=18 \\$' hindsight/Dockerfile
 expect_file_line 'Dockerfile has the OCI source label' \
   'org\.opencontainers\.image\.source="https://github\.com/bonzanni/ha-hindsight-app"' hindsight/Dockerfile
 expect_file_line 'Dockerfile has the OCI title label' \

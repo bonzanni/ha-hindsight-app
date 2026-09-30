@@ -1,6 +1,6 @@
 name: Hindsight
 description: Agent memory (Hindsight) for Home Assistant
-version: "0.4.2"
+version: "0.5.0"
 slug: hindsight
 url: https://github.com/bonzanni/ha-hindsight-app
 image: "ghcr.io/bonzanni/hindsight"
@@ -27,6 +27,9 @@ options:
   llm_reasoning_effort: "low"
   reranker_enabled: true
   enable_ui: true
+  recency_decay: "exponential"
+  recency_halflife_days: 30
+  recency_linear_window_days: 365
   log_level: "info"
 schema:
   openrouter_api_key: password
@@ -34,4 +37,7 @@ schema:
   llm_reasoning_effort: list(low|medium|high)
   reranker_enabled: bool
   enable_ui: bool
+  recency_decay: list(exponential|linear|none)
+  recency_halflife_days: int(1,3650)
+  recency_linear_window_days: int(1,3650)
   log_level: list(debug|info|warning|error|critical)

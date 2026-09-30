@@ -21,6 +21,23 @@ configuration:
     description: >-
       Serve the Hindsight memory-browser UI in the sidebar. Disable for a
       headless, API-only deployment with a smaller memory footprint.
+  recency_decay:
+    name: Recency Decay
+    description: >-
+      How a memory's age nudges recall ranking (at most +/-10%, as a
+      tie-breaker between similarly relevant memories). exponential favours
+      the last few weeks; linear spreads the effect evenly over a window;
+      none disables it.
+  recency_halflife_days:
+    name: Recency Half-Life (days)
+    description: >-
+      For exponential decay, the age at which a memory gets no recency
+      boost or penalty. Shorter values favour recent state more strongly.
+  recency_linear_window_days:
+    name: Recency Window (days)
+    description: >-
+      For linear decay, the number of days over which the boost falls to its
+      minimum. Memories older than that all rank the same on recency.
   log_level:
     name: Log Level
     description: Application log verbosity.

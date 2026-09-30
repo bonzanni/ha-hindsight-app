@@ -40,7 +40,9 @@ an immutable digest for release evidence). For a local build,
 `hindsight/Dockerfile` is the source of truth and can be built directly with
 `docker build -t hindsight-addon:dev hindsight/`; there is no `build.yaml`.
 The OpenRouter key is in 1Password — `source ~/.op-token` then
-`export OPENROUTER_KEY="$(op read 'op://Claude Code/OpenRouter/credential')"`.
+`export OPENROUTER_KEY="$(op read 'op://Claude Code/66dekwvpd3g72nmztom55ivetm/credential')"`
+(item "OpenRouter: ClaudeCode"; its colon title can't go in an `op://` path, so
+it is referenced by ID).
 Playwright runs inside the official image (the host lacks browser libs like
 `libnspr4`); the ingress mimic runs in the add-on's network namespace so it
 reaches the allow-listed `127.0.0.1:8099`.
