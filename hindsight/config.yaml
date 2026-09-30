@@ -1,6 +1,6 @@
 name: Hindsight
 description: Agent memory (Hindsight) for Home Assistant
-version: "0.5.0"
+version: "0.5.1"
 slug: hindsight
 url: https://github.com/bonzanni/ha-hindsight-app
 image: "ghcr.io/bonzanni/hindsight"

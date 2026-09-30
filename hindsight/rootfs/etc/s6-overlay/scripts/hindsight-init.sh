@@ -22,7 +22,7 @@ fi
 
 # --- gather config (supervised: bashio; standalone: environment) -------------
 declare OPENROUTER_KEY LLM_MODEL LLM_EFFORT LOG_LEVEL RERANKER_ENABLED ENABLE_UI
-declare RECENCY_DECAY RECENCY_HALFLIFE RECENCY_WINDOW
+declare RECENCY_DECAY RECENCY_HALFLIFE RECENCY_WINDOW WORKER_ID=""
 if bashio::var.true "${SUPERVISED}"; then
     OPENROUTER_KEY=$(bashio::config 'openrouter_api_key')
     LLM_MODEL=$(bashio::config 'llm_model')
@@ -35,6 +35,16 @@ if bashio::var.true "${SUPERVISED}"; then
     RECENCY_DECAY=$(bashio::config 'recency_decay' 'exponential')
     RECENCY_HALFLIFE=$(bashio::config 'recency_halflife_days' '30')
     RECENCY_WINDOW=$(bashio::config 'recency_linear_window_days' '365')
+    # Stable worker id for upstream's task recovery (recover_own_tasks matches
+    # tasks left in 'processing' by this id). Unset, upstream defaults to
+    # socket.gethostname() and warns that a container hostname may change on
+    # recreation. Under the Supervisor it does not: the Supervisor names the
+    # container after the app's slug, which is fixed per install. Pin exactly
+    # the kernel hostname -- the value socket.gethostname() returns -- so the id
+    # is byte-identical to the one earlier versions used on THIS install and no
+    # in-flight task is orphaned by the switch. Nothing install-specific is
+    # hardcoded here.
+    WORKER_ID=$(cat /proc/sys/kernel/hostname)
 else
     bashio::log.info "Not under Supervisor; using environment variables."
     OPENROUTER_KEY="${HINDSIGHT_API_LLM_API_KEY:-}"
@@ -80,6 +90,11 @@ fi
     echo "HINDSIGHT_API_RECENCY_DECAY_FUNCTION=${RECENCY_DECAY}"
     echo "HINDSIGHT_API_RECENCY_DECAY_HALFLIFE_DAYS=${RECENCY_HALFLIFE}"
     echo "HINDSIGHT_API_RECENCY_DECAY_LINEAR_WINDOW_DAYS=${RECENCY_WINDOW}"
+    # Standalone mode: a HINDSIGHT_API_WORKER_ID from the container environment
+    # already reaches the API (the env file only adds to it), so write nothing.
+    if [ -n "${WORKER_ID}" ]; then
+        echo "HINDSIGHT_API_WORKER_ID=${WORKER_ID}"
+    fi
 } > "${ENV_FILE}"
 chmod 600 "${ENV_FILE}"
 chown hindsight:hindsight "${ENV_FILE}"
