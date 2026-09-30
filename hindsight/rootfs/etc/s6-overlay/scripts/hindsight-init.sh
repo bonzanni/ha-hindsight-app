@@ -22,6 +22,7 @@ fi
 
 # --- gather config (supervised: bashio; standalone: environment) -------------
 declare OPENROUTER_KEY LLM_MODEL LLM_EFFORT LOG_LEVEL RERANKER_ENABLED ENABLE_UI
+declare RECENCY_DECAY RECENCY_HALFLIFE RECENCY_WINDOW
 if bashio::var.true "${SUPERVISED}"; then
     OPENROUTER_KEY=$(bashio::config 'openrouter_api_key')
     LLM_MODEL=$(bashio::config 'llm_model')
@@ -29,6 +30,11 @@ if bashio::var.true "${SUPERVISED}"; then
     LOG_LEVEL=$(bashio::config 'log_level')
     RERANKER_ENABLED=$(bashio::config 'reranker_enabled')
     ENABLE_UI=$(bashio::config 'enable_ui')
+    # Defaults repeated here so an install updated from <0.5.0 whose stored
+    # options predate these keys still gets the add-on default.
+    RECENCY_DECAY=$(bashio::config 'recency_decay' 'exponential')
+    RECENCY_HALFLIFE=$(bashio::config 'recency_halflife_days' '30')
+    RECENCY_WINDOW=$(bashio::config 'recency_linear_window_days' '365')
 else
     bashio::log.info "Not under Supervisor; using environment variables."
     OPENROUTER_KEY="${HINDSIGHT_API_LLM_API_KEY:-}"
@@ -37,6 +43,9 @@ else
     LOG_LEVEL="${HINDSIGHT_API_LOG_LEVEL:-info}"
     RERANKER_ENABLED="${RERANKER_ENABLED:-true}"
     ENABLE_UI="${ENABLE_UI:-true}"
+    RECENCY_DECAY="${HINDSIGHT_API_RECENCY_DECAY_FUNCTION:-exponential}"
+    RECENCY_HALFLIFE="${HINDSIGHT_API_RECENCY_DECAY_HALFLIFE_DAYS:-30}"
+    RECENCY_WINDOW="${HINDSIGHT_API_RECENCY_DECAY_LINEAR_WINDOW_DAYS:-365}"
 fi
 
 if [ -z "${OPENROUTER_KEY}" ]; then
@@ -68,6 +77,9 @@ fi
     echo "HINDSIGHT_CP_DATAPLANE_API_URL=http://localhost:8888"
     echo "HINDSIGHT_API_EMBEDDINGS_PROVIDER=local"
     echo "${RERANKER_LINE}"
+    echo "HINDSIGHT_API_RECENCY_DECAY_FUNCTION=${RECENCY_DECAY}"
+    echo "HINDSIGHT_API_RECENCY_DECAY_HALFLIFE_DAYS=${RECENCY_HALFLIFE}"
+    echo "HINDSIGHT_API_RECENCY_DECAY_LINEAR_WINDOW_DAYS=${RECENCY_WINDOW}"
 } > "${ENV_FILE}"
 chmod 600 "${ENV_FILE}"
 chown hindsight:hindsight "${ENV_FILE}"
@@ -76,4 +88,4 @@ if bashio::var.false "${ENABLE_UI}"; then
     bashio::log.info "Control-plane UI disabled (API-only mode); sidebar panel inactive."
 fi
 
-bashio::log.info "Hindsight init complete. Model: ${LLM_MODEL}, reranker: ${RERANKER_ENABLED}, UI: ${ENABLE_UI}"
+bashio::log.info "Hindsight init complete. Model: ${LLM_MODEL}, reranker: ${RERANKER_ENABLED}, UI: ${ENABLE_UI}, recency: ${RECENCY_DECAY}"

@@ -1,20 +1,54 @@
-Recall handler deadline + bounded worker drain, for the Hindsight HA add-on.
+Recall request deadline + bounded worker drain, for the Hindsight HA add-on.
 
 Applied in the Dockerfile with `patch -p1 -d /app/api` against the API package
-COPY-ed from the digest-pinned upstream image (v0.7.1 / 779e3140; the package
+COPY-ed from the digest-pinned upstream image (v0.10.2 / 5fc4ce20; the package
 is an editable install, so the source lives at /app/api/hindsight_api). When
 bumping HINDSIGHT_IMAGE, regenerate this patch against the new source — the
 build fails loudly here if the context drifts.
 
 Two changes, both no-ops unless their env var is set:
 
-1. api/http.py api_recall: wrap recall_async in asyncio.wait_for when
-   HINDSIGHT_API_RECALL_HANDLER_TIMEOUT (seconds) > 0. On expiry the recall
-   task is cancelled and the pre-existing `except (asyncio.TimeoutError,
-   TimeoutError)` branch returns 504, so callers fail fast instead of the
-   server silently working past the caller's own timeout (observed on the
-   N150: aborted clients leave doomed work running to completion, so queues
-   grow without bound during busy evenings).
+1. api/http.py: RecallDeadlineMiddleware, a pure-ASGI middleware installed in
+   create_app between upstream's ClientDisconnectCancellationMiddleware and
+   HttpObservabilityMiddleware. When HINDSIGHT_API_RECALL_HANDLER_TIMEOUT
+   (seconds) > 0, every POST .../memories/recall runs under ONE
+   asyncio.wait_for covering the WHOLE request — route-class bank-alias
+   resolution, dependencies (auth, precheck, admission queue), body parsing,
+   the engine call and all post-recall enrichment. On expiry the request task
+   is cancelled and the client gets a fast 504 (if no response has started)
+   instead of the server silently working past the consumer's own client
+   timeout (observed on the N150: aborted clients left doomed work running,
+   so queues grew without bound during busy evenings). Being inside the
+   observability layer, the 504 is recorded in the HTTP request metrics.
+   History: until add-on v0.4.x the deadline wrapped only the engine call.
+   Rebasing onto v0.10.2, review found work escaping every narrower scope in
+   turn — post-recall attachment lookups, the admission queue, and bank-alias
+   resolution in the route class — so the deadline now bounds the request
+   itself and covers anything upstream adds on the recall path later.
+   Upstream (v0.9+) also cancels a recall when the client DISCONNECTS (499);
+   this deadline is the complement — a typed 504 BEFORE the consumer's budget.
+
+   metrics.py MetricsCollector.record_operation: the deadline cancels from
+   OUTSIDE, so an engine call still in flight sees asyncio.CancelledError (a
+   BaseException upstream's `except Exception` misses) and was recorded as a
+   SUCCESS. An explicit CancelledError branch now records it as failed.
+   (Client disconnects arrive as OperationCancelledError and stay excluded.)
+   The operation metric keeps upstream's scope — the ENGINE outcome — so a
+   deadline hit during post-recall enrichment after a successful engine call
+   is visible as the request's 504 in the HTTP metrics, not as a failed
+   engine operation.
+
+   api/admission.py _acquire_unless_abandoned: the deadline can now cancel a
+   request while it waits in upstream's admission queue. Upstream's race
+   (acquire task vs. disconnect token) only cleaned up the token task on
+   cancellation, so the orphaned acquire task later took a permit and never
+   returned it -- each occurrence permanently shrank the recall lane until
+   restart. On cancellation it now cancels the acquire task and returns the
+   permit (via a done-callback) if one was already granted.
+
+   build-smoke/recall_deadline_smoke.py gates all of this at build time
+   through the PRODUCTION create_app (real middleware stack, route class and
+   dependencies) with a stub engine, one slow step at a time.
 
 2. api/http.py lifespan: make the worker poller drain timeout configurable
    via HINDSIGHT_API_WORKER_SHUTDOWN_TIMEOUT (was hardcoded 30.0s). With the
@@ -23,17 +57,103 @@ Two changes, both no-ops unless their env var is set:
    in flight at stop time — e.g. every nightly cold backup. In-flight worker
    tasks are re-queued/retried after restart, so a short drain is safe.
 
---- a/hindsight_api/api/http.py	2026-07-12 08:18:32.288595189 +0200
-+++ b/hindsight_api/api/http.py	2026-07-12 08:19:24.277470245 +0200
-@@ -8,6 +8,7 @@
- import asyncio
- import json
- import logging
-+import os
- import re
- import uuid
- from contextlib import asynccontextmanager
-@@ -2699,7 +2700,12 @@
+--- a/hindsight_api/api/admission.py
++++ b/hindsight_api/api/admission.py
+@@ -128,6 +128,19 @@
+     gone = asyncio.ensure_future(abandoned.wait())
+     try:
+         done, _ = await asyncio.wait({acquire, gone}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
++    except BaseException:
++        # HA add-on patch: the caller was cancelled while queued (the add-on's
++        # whole-request recall deadline cancels the request task from outside).
++        # Without this the orphaned `acquire` task would take the next free
++        # permit and never hand it back, draining the lane until restart. Cancel
++        # it, and if it already holds a permit (granted in the same tick) return
++        # it from a done-callback -- no await here, so a second cancellation
++        # cannot interrupt the cleanup.
++        acquire.cancel()
++        acquire.add_done_callback(
++            lambda task: None if task.cancelled() or task.exception() is not None else semaphore.release()
++        )
++        raise
+     finally:
+         gone.cancel()
+ 
+--- a/hindsight_api/api/http.py
++++ b/hindsight_api/api/http.py
+@@ -338,6 +338,71 @@
+ _T = TypeVar("_T")
+ 
+ 
++_RECALL_DEADLINE_DETAIL = "Request timed out while searching memories. Try a shorter or more specific query."
++
++
++class RecallDeadlineMiddleware:
++    """End-to-end recall request deadline (HA add-on patch; pure ASGI).
++
++    When HINDSIGHT_API_RECALL_HANDLER_TIMEOUT (seconds) > 0, every
++    POST .../memories/recall request runs under ONE asyncio.wait_for from the
++    moment it enters this middleware until it finishes: route-class work (bank
++    alias resolution), dependencies (auth, precheck, admission queue), body
++    parsing, the engine call and all post-recall enrichment. On expiry the
++    request task is cancelled and, if no response has started yet, the client
++    gets a fast 504 instead of the server silently overrunning the consumer's
++    own budget. Bounding the whole request (not individual layers or awaits)
++    means work upstream adds anywhere on the recall path is covered
++    automatically. 0/unset passes requests straight through (upstream
++    behavior). Installed inside HttpObservabilityMiddleware so the 504 is
++    recorded in the HTTP request metrics.
++    """
++
++    def __init__(self, app) -> None:
++        self.app = app
++
++    async def __call__(self, scope, receive, send) -> None:
++        if (
++            scope["type"] != "http"
++            or scope.get("method") != "POST"
++            or not scope.get("path", "").endswith("/memories/recall")
++        ):
++            await self.app(scope, receive, send)
++            return
++        deadline = float(os.getenv("HINDSIGHT_API_RECALL_HANDLER_TIMEOUT", "0") or "0")
++        if deadline <= 0:
++            await self.app(scope, receive, send)
++            return
++
++        started = False
++
++        async def tracking_send(message) -> None:
++            nonlocal started
++            if message["type"] == "http.response.start":
++                # Set BEFORE awaiting: a cancellation landing mid-send must not
++                # make us emit a second response start.
++                started = True
++            await send(message)
++
++        try:
++            await asyncio.wait_for(self.app(scope, receive, tracking_send), timeout=deadline)
++        except (asyncio.TimeoutError, TimeoutError):
++            logger.error(f"[RECALL TIMEOUT] path={scope.get('path')} request deadline {deadline:g}s exceeded")
++            if started:
++                # The response already began; nothing valid can replace it. The
++                # server closes the incomplete response.
++                return
++            body = json.dumps({"detail": _RECALL_DEADLINE_DETAIL}).encode()
++            await send(
++                {
++                    "type": "http.response.start",
++                    "status": 504,
++                    "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())],
++                }
++            )
++            await send({"type": "http.response.body", "body": body})
++
++
+ async def run_cancellable_on_disconnect(
+     http_request: Request,
+     request_context: RequestContext,
+@@ -5048,7 +5113,12 @@
  
          # Shutdown worker poller if running
          if poller is not None:
@@ -47,29 +167,33 @@ Two changes, both no-ops unless their env var is set:
              if poller_task is not None:
                  poller_task.cancel()
                  try:
-@@ -3278,7 +3284,7 @@
-                 "recall", bank_id=bank_id, source="api", budget=request.budget.value, max_tokens=request.max_tokens
-             ):
-                 recall_start = time.time()
--                core_result = await app.state.memory.recall_async(
-+                _recall_coro = app.state.memory.recall_async(
-                     bank_id=bank_id,
-                     query=request.query,
-                     budget=request.budget,
-@@ -3298,6 +3304,16 @@
-                     tags_match=request.tags_match,
-                     tag_groups=request.tag_groups,
-                 )
-+                # End-to-end handler deadline (seconds). 0/unset preserves the
-+                # historical wait-forever behavior. On expiry the recall task is
-+                # cancelled and the existing TimeoutError handler below returns
-+                # 504, so callers fail fast instead of silently overrunning
-+                # their own client timeout.
-+                _handler_deadline = float(os.getenv("HINDSIGHT_API_RECALL_HANDLER_TIMEOUT", "0") or "0")
-+                if _handler_deadline > 0:
-+                    core_result = await asyncio.wait_for(_recall_coro, timeout=_handler_deadline)
-+                else:
-+                    core_result = await _recall_coro
- 
-             # Convert core MemoryFact objects to API RecallResult objects (excluding internal metrics)
-             def _fact_to_result(fact: "MemoryFact") -> RecallResult:
+@@ -5173,6 +5243,11 @@
+     # Request.is_disconnected(), so the only way to observe an abandoned request
+     # is to own the raw ASGI receive channel from outside it (issue #2122).
+     app.add_middleware(ClientDisconnectCancellationMiddleware)
++    # HA add-on patch: whole-request recall deadline. Added after the disconnect
++    # middleware and before HttpObservabilityMiddleware, so it bounds everything
++    # below it (route class, dependencies, endpoint) while the observability
++    # layer above still records its 504.
++    app.add_middleware(RecallDeadlineMiddleware)
+     # Pure ASGI, so unlike the BaseHTTPMiddleware it replaces it adds no task hop:
+     # records the request metrics and attaches X-Ignored-Params for the route class.
+     app.add_middleware(HttpObservabilityMiddleware)
+--- a/hindsight_api/metrics.py
++++ b/hindsight_api/metrics.py
+@@ -688,6 +688,15 @@
+         cancelled = False
+         try:
+             yield
++        except asyncio.CancelledError:
++            # HA add-on patch: the recall deadline cancels the whole request
++            # task (see RecallDeadlineMiddleware in api/http.py), which
++            # surfaces here as CancelledError -- a BaseException the branch
++            # below never sees. Without this a 504 would be recorded as a
++            # successful operation. (Client disconnects arrive as
++            # OperationCancelledError, an Exception, and stay excluded below.)
++            success = False
++            raise
+         except Exception as exc:
+             # A client disconnect cancels the operation cooperatively (#2122),
+             # raised as OperationCancelledError and re-raised by the HTTP layer

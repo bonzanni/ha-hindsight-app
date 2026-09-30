@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.5.0
+
+Update Hindsight from upstream v0.7.1 to v0.10.2. This spans three upstream
+minor releases with many database migrations, which run automatically on
+first start. **Take a Home Assistant backup of the add-on before updating.**
+
+Upstream highlights relevant to this add-on:
+
+- Recall: facts without an explicit event date now rank by when they were
+  mentioned, instead of getting a neutral recency score, so newer memories
+  outrank stale ones. The recency decay is configurable via
+  `HINDSIGHT_API_RECENCY_DECAY_FUNCTION` (linear/exponential/none).
+- New recall options: `prefer_observations`, `min_scores`,
+  `temporal_window`. Results carry a per-stage `scores` object and
+  `mentioned_at`.
+- Recalls and reflects are cancelled when the client disconnects.
+- Consolidation no longer creates duplicate observations, and its internal
+  recalls skip the neural reranker natively.
+- Whole-bank export/import for migrating between instances.
+- The control plane drops the locale slug from URLs.
+
+Add-on changes:
+
+- New options `recency_decay`, `recency_halflife_days` and
+  `recency_linear_window_days` control how memory age nudges recall ranking.
+  **The add-on defaults to `exponential` decay with a 30-day half-life,
+  not upstream's `linear` 365-day curve.** Upstream's curve separates facts a
+  week apart by only about 0.4%, which is too little to reliably order a
+  fact that changed recently. See DOCS for the trade-off, and set `linear` /
+  `365` to match upstream exactly.
+- Rebased both local patches onto v0.10.2. The bounded worker drain is
+  unchanged. The reranker busy-degrade now uses upstream's native RRF ranking
+  path. The consolidation reranker passthrough was removed because upstream
+  now does this itself.
+- The 18s recall deadline now covers the whole request, from arrival to
+  response. v0.10 does work before and after the search: bank-alias lookups,
+  an admission queue, and attachment lookups after every recall. A deadline
+  around the search alone let a recall answer late, past the consumer's 20s
+  budget. Timed-out requests show as 504 in the HTTP metrics, and a search
+  cut off by the deadline is counted as a failed operation. A request that
+  times out while queued for admission gives its slot back. Upstream leaked
+  it, which would slowly shrink recall capacity until a restart.
+- Upstream's new recall admission queue is limited to a 1s wait, down from
+  30s. When the server is at capacity, a recall gets a fast 503 with
+  `Retry-After` instead of an 18s timeout.
+- Node 20 (end of life) is replaced by Node 24, matching upstream.
+- Token counting uses upstream's bundled tokenizer, so the tiktoken cache is
+  no longer shipped.
+- The consolidation worker-slot setting was renamed to the non-deprecated
+  `HINDSIGHT_API_WORKER_CONSOLIDATION_RESERVED_SLOTS`. The value is
+  unchanged. It reserves a minimum number of slots and never capped
+  consolidation.
+
 ## 0.4.2
 
 Repository renamed to https://github.com/bonzanni/ha-hindsight-app (was

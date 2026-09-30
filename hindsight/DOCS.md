@@ -56,6 +56,37 @@ the same `/data` volume, so the update does not reset memory or configuration.
   headless, API-only deployment; this reduces the add-on's memory footprint
   slightly.
 
+### Recall Recency
+
+Hindsight nudges recall ranking by memory age. The nudge is small and bounded:
+the reranker's relevance score is multiplied by at most ±10% (fresh memories
+up, old ones down), so recency mostly decides between memories that are about
+equally relevant. The typical case is the same fact at two points in time
+("the thermostat is set to 19°C" vs "… 21°C"), which the reranker scores
+identically.
+
+- **recency_decay**: `exponential` (default), `linear`, or `none`.
+- **recency_halflife_days**: For `exponential`, the age at which a memory is
+  neutral (no boost or penalty). Default `30`.
+- **recency_linear_window_days**: For `linear`, the number of days over which
+  the boost falls to its floor. Default `365`.
+
+The add-on default differs from upstream's (`linear`, 365 days). Under
+upstream's curve, facts one week apart differ by only about 0.4%, which is
+often less than the reranker's noise between two phrasings of the same fact,
+and anything older than about 330 days ties exactly. An exponential curve with
+a 30-day half-life gives about 2.7% between 1 and 8 days old and about 8.6%
+between 7 and 37 days old, and keeps even old memories ordered. The cost is
+that a durable fact from several months ago sits up to about 20% below a very
+recent memory of similar relevance. It is still returned, just ranked lower
+among near-ties. For a slower, more even effect choose `exponential` with 90
+days, or `linear` with 365 days to match upstream exactly.
+
+Recency cannot fix a stale fact that the reranker clearly prefers. For
+example, "the provider is Enel" can outscore "switched to Octopus" by about
+30%. Use `prefer_observations` and the dates returned with each recall result
+for that case.
+
 ### Logging
 
 - **log_level**: Controls application log verbosity. One of `debug`, `info`

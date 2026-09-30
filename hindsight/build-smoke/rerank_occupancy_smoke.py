@@ -42,6 +42,8 @@ def _encoder(fail: bool = False) -> LocalSTCrossEncoder:
     enc._model = _StubModel(fail=fail)
     enc.bucket_batching = False
     enc.batch_size = 32
+    enc.timeout = 0  # upstream wall-clock ceiling between batches; 0 disables
+    enc._device_type = "cpu"
     return enc
 
 

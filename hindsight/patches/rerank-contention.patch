@@ -1,64 +1,56 @@
-Reranker-lane contention control, for the Hindsight HA add-on.
+Reranker-lane busy-degrade, for the Hindsight HA add-on.
 
 Applied in the Dockerfile with `patch -p1 -d /app/api` against the API package
-COPY-ed from the digest-pinned upstream image (v0.7.1 / 779e3140). When
+COPY-ed from the digest-pinned upstream image (v0.10.2 / 5fc4ce20). When
 bumping HINDSIGHT_IMAGE, regenerate this patch against the new source — the
 build fails loudly here if the context drifts.
 
 Problem (measured on the N150, 2026-07-20): the local cross-encoder rerank is
 the serialized section of every recall — ~6.5s per 100-pair job with
-RERANKER_LOCAL_MAX_CONCURRENT=1 — and the executor queue is FIFO. Any queue
-depth >= 3 pushes the tail past the 15s recall handler deadline (504).
-Consolidation batches issue one internal recall per fact through the same
-lane (observed: recall=283.9s per batch), starving interactive recalls for
-minutes (the 75-80% 504 window). Even without consolidation, a 6-deep
-interactive burst 504s at 66% (measured: 7.4s, 13.8s, then 4x 504@15s), with
-the CPU already saturated (~390% of 400%), so raising the reranker
+RERANKER_LOCAL_MAX_CONCURRENT=1 — and the executor queue is FIFO. A 6-deep
+interactive burst 504'd at 66% (measured: 7.4s, 13.8s, then 4x 504@15s),
+with the CPU already saturated (~390% of 400%), so raising the reranker
 concurrency would only thrash.
 
-Three changes, all no-ops unless their env var is set:
+(Until add-on v0.4.x this patch also routed consolidation's internal recalls
+off the cross-encoder lane. Upstream v0.9+ does that natively — consolidation
+recall passes reranking="interleave" and never touches the cross-encoder — so
+that half was dropped when rebasing onto v0.10.2.)
 
-1. engine/consolidation/consolidator.py _find_related_observations: set a
-   contextvar marking the recall as consolidation-internal.
+One change, a no-op unless its env var is set:
 
-2. engine/memory_engine.py recall step 4: when the contextvar is set,
-   HINDSIGHT_API_CONSOLIDATION_RECALL_RERANKER=rrf, and the configured
-   reranker is the local provider (the contended lane), use an
-   RRFPassthroughCrossEncoder-backed reranker instead of the local
-   cross-encoder. Upstream's is_passthrough_reranker path in
-   apply_combined_scoring seeds CE scores from RRF rank, so ordering
-   degrades gracefully; consolidation is LLM-mediated and quality-tolerant
-   (it already runs at budget=low).
-
-3. engine/memory_engine.py + engine/cross_encoder.py busy-degrade: when
-   HINDSIGHT_API_RERANKER_BUSY_PASSTHROUGH_THRESHOLD=N (>0) and the local
-   reranker lane already has >= N unfinished jobs, an interactive recall
-   falls back to RRF-passthrough ordering instead of queueing toward a
-   certain 504 — degraded ranking beats an "unavailable" outcome for
-   consumers. Occupancy is tracked in LocalSTCrossEncoder: incremented on
-   submit in the event loop, released by a done-callback on the concurrent
-   future, which fires exactly once for normal completion, worker exception,
-   or cancellation of a still-queued job — and NOT before a started thread
-   actually finishes, so doomed post-deadline work stays visible to the
-   check and a cancelled queued job cannot leak the counter.
-   Atomicity of check-then-submit: the reranker initializes eagerly at
-   startup (lazy_reranker defaults false), after which there is no event-
-   loop suspension between the step-4 pending_jobs() check and the submit
-   increment; the API and worker share one event loop.
-   The build runs build-smoke/rerank_occupancy_smoke.py as a regression
-   gate for the accounting.
+engine/memory_engine.py + engine/cross_encoder.py busy-degrade: when
+HINDSIGHT_API_RERANKER_BUSY_PASSTHROUGH_THRESHOLD=N (>0) and the local
+reranker lane already has >= N unfinished jobs, an interactive recall
+switches to upstream's native reranking="rrf" path (fusion order,
+passthrough scoring, scores.reranker=None in the response) instead of
+queueing toward a certain 504 — degraded ranking beats an "unavailable"
+outcome for consumers. Occupancy is tracked in LocalSTCrossEncoder:
+incremented on submit in the event loop, released by a done-callback on the
+concurrent future, which fires exactly once for normal completion, worker
+exception, or cancellation of a still-queued job — and NOT before a started
+thread actually finishes, so doomed post-deadline work stays visible to the
+check and a cancelled queued job cannot leak the counter.
+Atomicity of check-then-submit: the check sits after the last await of
+recall step 4 (hydrate_results); the reranker initializes eagerly at startup
+(upstream removed the lazy option), the local provider carries no retry
+wrapper, and pair building is synchronous, so there is no event-loop
+suspension between the pending_jobs() check and the submit increment; the
+API and worker share one event loop.
+The build runs build-smoke/rerank_occupancy_smoke.py as a regression gate
+for the accounting.
 
 --- a/hindsight_api/engine/cross_encoder.py
 +++ b/hindsight_api/engine/cross_encoder.py
 @@ -9,6 +9,7 @@
  import asyncio
+ import contextvars
  import logging
- import os
 +import threading
+ import time
  import warnings
  from abc import ABC, abstractmethod
- from concurrent.futures import ThreadPoolExecutor
-@@ -155,6 +156,24 @@
+@@ -193,6 +194,24 @@
      _executor: ThreadPoolExecutor | None = None
      _max_concurrent: int = 4  # Limit concurrent CPU-bound reranking calls
  
@@ -83,9 +75,9 @@ Three changes, all no-ops unless their env var is set:
      def __init__(
          self,
          model_name: str | None = None,
-@@ -297,6 +316,16 @@
+@@ -347,6 +366,16 @@
          else:
-             logger.info("Reranker: local provider initialized (using existing executor)")
+             logger.info(f"Reranker: local provider initialized (device: {self._device_type}, using existing executor)")
  
 +    @staticmethod
 +    def _release_pending_slot(_future) -> None:
@@ -100,7 +92,7 @@ Three changes, all no-ops unless their env var is set:
      def _predict_sync(self, pairs: list[tuple[str, str]]) -> list[float]:
          """Synchronous prediction wrapper for thread pool execution.
  
-@@ -345,12 +374,21 @@
+@@ -404,12 +433,21 @@
              raise RuntimeError("Reranker not initialized. Call initialize() first.")
  
          # Use dedicated executor - limited workers naturally limits concurrency
@@ -130,123 +122,52 @@ Three changes, all no-ops unless their env var is set:
  class RemoteTEICrossEncoder(CrossEncoderModel):
 --- a/hindsight_api/engine/memory_engine.py
 +++ b/hindsight_api/engine/memory_engine.py
-@@ -13,6 +13,7 @@
- import contextvars
+@@ -18,6 +18,7 @@
+ import inspect
  import json
  import logging
 +import os
+ import random
+ import sys
  import time
- import uuid
- from collections.abc import Awaitable, Callable
-@@ -54,6 +55,15 @@
- _current_schema: contextvars.ContextVar[str | None] = contextvars.ContextVar("current_schema", default=None)
- MENTAL_MODEL_PENDING_CONTENT = "Generating content..."
+@@ -9348,6 +9349,40 @@
+                     {"candidates": len(merged_candidates)},
+                 )
  
-+# Marks a recall as consolidation-internal (set around the recall_async call in
-+# consolidation's _find_related_observations; propagates through the await
-+# chain). When HINDSIGHT_API_CONSOLIDATION_RECALL_RERANKER=rrf, such recalls
-+# use the RRF passthrough reranker instead of the serialized local
-+# cross-encoder lane that interactive recalls depend on.
-+_RERANK_PASSTHROUGH_CTX: contextvars.ContextVar[bool] = contextvars.ContextVar(
-+    "rerank_passthrough", default=False
-+)
++                # Reranker-lane busy-degrade (HA add-on patch): when
++                # HINDSIGHT_API_RERANKER_BUSY_PASSTHROUGH_THRESHOLD=N (>0) and
++                # the serialized local cross-encoder lane already holds >= N
++                # unfinished jobs, this recall takes upstream's "rrf" path
++                # (fusion order, passthrough scoring, scores.reranker=None)
++                # instead of queueing toward a certain handler-deadline 504.
++                # ATOMICITY: this is the last await before the rerank; from
++                # here to the occupancy increment in LocalSTCrossEncoder._predict
++                # there is no event-loop suspension (raise_if_cancelled is sync,
++                # ensure_initialized returns without awaiting once the eagerly
++                # initialized reranker is up, pair building is synchronous, and
++                # the local provider has no retry wrapper), so concurrent
++                # recalls cannot slip past the threshold check en masse.
++                if reranking == "cross_encoder":
++                    try:
++                        _busy_threshold = int(
++                            os.getenv("HINDSIGHT_API_RERANKER_BUSY_PASSTHROUGH_THRESHOLD", "0") or "0"
++                        )
++                    except ValueError:
++                        # Malformed knob must not turn recalls into 500s.
++                        _busy_threshold = 0
++                    if _busy_threshold > 0:
++                        _pending_fn = getattr(reranker_instance.cross_encoder, "pending_jobs", None)
++                        if callable(_pending_fn):
++                            _pending_now = _pending_fn()
++                            if _pending_now >= _busy_threshold:
++                                logger.info(
++                                    "[RECALL] rerank busy-degrade: %d unfinished rerank jobs >= threshold %d, "
++                                    "using RRF passthrough for this recall",
++                                    _pending_now,
++                                    _busy_threshold,
++                                )
++                                reranking = "rrf"
 +
- 
- def get_current_schema() -> str:
-     """Get the current schema from context (falls back to config default)."""
-@@ -859,6 +869,14 @@
-         # Initialize cross-encoder reranker (cached for performance)
-         self._cross_encoder_reranker = CrossEncoderReranker(cross_encoder=cross_encoder)
- 
-+        # RRF passthrough lane for reranker contention control: used for
-+        # consolidation-internal recalls and for busy-degrade of interactive
-+        # recalls (see the step-4 selection in _search_impl). Holds no model;
-+        # negligible memory.
-+        from .cross_encoder import RRFPassthroughCrossEncoder
-+
-+        self._rrf_passthrough_reranker = CrossEncoderReranker(cross_encoder=RRFPassthroughCrossEncoder())
-+
-         # Initialize task backend.
-         # All backends use BrokerTaskBackend + WorkerPoller for async background execution.
-         # Create the backend object early so we can query its capabilities.
-@@ -3637,6 +3655,56 @@
-             # Step 4: Rerank using cross-encoder (MergedCandidate -> ScoredResult)
-             step_start = time.time()
-             reranker_instance = self._cross_encoder_reranker
-+            # Reranker-lane contention control: two env-gated escape hatches
-+            # route this recall to the RRF passthrough reranker (combined
-+            # scoring below then seeds CE scores from RRF rank via
-+            # is_passthrough_reranker):
-+            #   1. consolidation-internal recalls
-+            #      (HINDSIGHT_API_CONSOLIDATION_RECALL_RERANKER=rrf), so
-+            #      background batches stop monopolizing the serialized local
-+            #      cross-encoder lane;
-+            #   2. busy-degrade: interactive recalls that would queue behind
-+            #      >= N unfinished rerank jobs
-+            #      (HINDSIGHT_API_RERANKER_BUSY_PASSTHROUGH_THRESHOLD=N) --
-+            #      degraded ordering beats a handler-deadline 504.
-+            # NOTE: between the pending_jobs() check here and the occupancy
-+            # increment inside LocalSTCrossEncoder.predict there is no event-
-+            # loop suspension (ensure_initialized returns without awaiting
-+            # once initialized; pair building is synchronous), so concurrent
-+            # recalls cannot slip past the threshold check en masse.
-+            _rerank_passthrough_reason = None
-+            if _RERANK_PASSTHROUGH_CTX.get():
-+                # Only reroute when the configured reranker is the contended
-+                # serialized *local* lane; with a remote or already-rrf
-+                # provider there is nothing to protect.
-+                if (
-+                    os.getenv("HINDSIGHT_API_CONSOLIDATION_RECALL_RERANKER", "").strip().lower() == "rrf"
-+                    and getattr(self._cross_encoder_reranker.cross_encoder, "provider_name", "") == "local"
-+                ):
-+                    _rerank_passthrough_reason = "consolidation"
-+            else:
-+                try:
-+                    _busy_threshold = int(
-+                        os.getenv("HINDSIGHT_API_RERANKER_BUSY_PASSTHROUGH_THRESHOLD", "0") or "0"
-+                    )
-+                except ValueError:
-+                    # Malformed knob must not turn recalls into 500s.
-+                    _busy_threshold = 0
-+                if _busy_threshold > 0:
-+                    _pending_fn = getattr(self._cross_encoder_reranker.cross_encoder, "pending_jobs", None)
-+                    if callable(_pending_fn):
-+                        _pending_now = _pending_fn()
-+                        if _pending_now >= _busy_threshold:
-+                            _rerank_passthrough_reason = "busy"
-+                            logger.info(
-+                                "[RECALL] rerank busy-degrade: %d unfinished rerank jobs >= threshold %d, "
-+                                "using RRF passthrough for this recall",
-+                                _pending_now,
-+                                _busy_threshold,
-+                            )
-+            if _rerank_passthrough_reason is not None:
-+                reranker_instance = self._rrf_passthrough_reranker
-+                log_buffer.append(f"  [4] Rerank passthrough ({_rerank_passthrough_reason}): RRF ordering used")
- 
-             rerank_span = tracer_otel.start_span("hindsight.recall_rerank")
-             rerank_span.set_attribute("hindsight.bank_id", bank_id)
---- a/hindsight_api/engine/consolidation/consolidator.py
-+++ b/hindsight_api/engine/consolidation/consolidator.py
-@@ -1190,6 +1190,13 @@
-     # Resolve budget: consolidation doesn't need deep recall, default to LOW to reduce memory fan-out
-     recall_budget = Budget(config.consolidation_recall_budget)
- 
-+    # Mark this recall as consolidation-internal so the engine can route it to
-+    # the RRF passthrough reranker (env-gated) instead of the serialized local
-+    # cross-encoder lane that interactive recalls depend on. Import at call
-+    # time to avoid touching module import order.
-+    from ..memory_engine import _RERANK_PASSTHROUGH_CTX
-+
-+    _passthrough_token = _RERANK_PASSTHROUGH_CTX.set(True)
-     try:
-         recall_result = await memory_engine.recall_async(
-             bank_id=bank_id,
-@@ -1206,6 +1213,7 @@
-             _quiet=True,  # Suppress logging
-         )
-     finally:
-+        _RERANK_PASSTHROUGH_CTX.reset(_passthrough_token)
-         if recall_span:
-             recall_span.end()
- 
+                 if reranking == "cross_encoder":
+                     # Cancellation checkpoint: the cross-encoder rerank is the
+                     # single most CPU-expensive stage and runs in a worker thread
