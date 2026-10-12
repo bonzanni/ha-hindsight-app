@@ -13,7 +13,7 @@ ARG BUILD_FROM=ghcr.io/home-assistant/base-debian:trixie-2026.05.0
 # !! When bumping this digest, ALSO bump HINDSIGHT_REF (cp-builder, below) to the
 #    SAME upstream revision so the rebuilt control-plane matches the COPY-ed API,
 #    then re-run tests/run-ingress.sh (the CP's fetch/asset shapes can change).
-ARG HINDSIGHT_IMAGE=ghcr.io/vectorize-io/hindsight@sha256:d1840062a5b79940ab7a9f4809ceb90fc776d4ad737cd9329e9b5836cc64ab70
+ARG HINDSIGHT_IMAGE=ghcr.io/vectorize-io/hindsight@sha256:b5da1a9aece1f53a15f12821fb1470f358ed6c74dfaa0c4b1a39c3f3ae93e002
 
 FROM ${HINDSIGHT_IMAGE} AS upstream
 
@@ -32,8 +32,8 @@ FROM node:24-slim AS cp-builder
 # after a FROM is stage-scoped, so a bare re-declaration resolves to empty.
 # Empty HINDSIGHT_REF -> wrong source revision; empty placeholder -> basePath="".
 # !! Keep HINDSIGHT_REF in lockstep with the HINDSIGHT_IMAGE digest above (same
-#    upstream revision). v0.10.2 = 5fc4ce20; bump both together.
-ARG HINDSIGHT_REF=5fc4ce20917b916240cef27c212c387a177f115b
+#    upstream revision). v0.10.3 = eb6df499; bump both together.
+ARG HINDSIGHT_REF=eb6df499d35300e5b2f3f029b2e6adda04ed90f8
 ARG HA_INGRESS_PLACEHOLDER=/__HA_INGRESS__
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates \

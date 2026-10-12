@@ -1,7 +1,7 @@
 Reranker-lane busy-degrade, for the Hindsight HA add-on.
 
 Applied in the Dockerfile with `patch -p1 -d /app/api` against the API package
-COPY-ed from the digest-pinned upstream image (v0.10.2 / 5fc4ce20). When
+COPY-ed from the digest-pinned upstream image (v0.10.3 / eb6df499). When
 bumping HINDSIGHT_IMAGE, regenerate this patch against the new source — the
 build fails loudly here if the context drifts.
 
@@ -50,7 +50,7 @@ for the accounting.
  import time
  import warnings
  from abc import ABC, abstractmethod
-@@ -193,6 +194,24 @@
+@@ -212,6 +213,24 @@
      _executor: ThreadPoolExecutor | None = None
      _max_concurrent: int = 4  # Limit concurrent CPU-bound reranking calls
  
@@ -75,7 +75,7 @@ for the accounting.
      def __init__(
          self,
          model_name: str | None = None,
-@@ -347,6 +366,16 @@
+@@ -366,6 +385,16 @@
          else:
              logger.info(f"Reranker: local provider initialized (device: {self._device_type}, using existing executor)")
  
@@ -92,7 +92,7 @@ for the accounting.
      def _predict_sync(self, pairs: list[tuple[str, str]]) -> list[float]:
          """Synchronous prediction wrapper for thread pool execution.
  
-@@ -404,12 +433,21 @@
+@@ -423,12 +452,21 @@
              raise RuntimeError("Reranker not initialized. Call initialize() first.")
  
          # Use dedicated executor - limited workers naturally limits concurrency
@@ -130,7 +130,7 @@ for the accounting.
  import random
  import sys
  import time
-@@ -9348,6 +9349,40 @@
+@@ -9903,6 +9904,40 @@
                      {"candidates": len(merged_candidates)},
                  )
  
