@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.5.2
+
+Update Hindsight from upstream v0.10.2 to v0.10.3, a bug-fix and
+tag-filtering release. There is no PostgreSQL schema migration, and the
+embedded database engine is unchanged (PostgreSQL 18.1 + pgvector 0.8.5), so
+existing data is used as is.
+
+Upstream highlights relevant to this add-on:
+
+- Knowledge-base tree and search, and the entity list, detail and graph,
+  accept `tags` / `tags_match` / `tag_groups` filters.
+- A recall query longer than the token limit is truncated instead of being
+  rejected with HTTP 400.
+- Source text returned by recall and reflect follows its document's tags.
+- Reflect answers and mental models cite real memory ids.
+- Temporal-boost and link-expansion fixes change some recall rankings.
+- Fixes to consolidation (source counting, tag edits made during a run) and
+  mental-model refresh (delta replay, no pause on a transient provider
+  failure).
+- New optional `HINDSIGHT_API_RERANKER_MAX_TOKENS_PER_CANDIDATE` cap. The
+  add-on leaves it unset.
+
+Add-on changes: the recall-deadline and reranker busy-degrade patches are
+regenerated against v0.10.3 with unchanged behavior.
+
 ## 0.5.1
 
 Silence upstream's "HINDSIGHT_API_WORKER_ID is not set" startup warning by
