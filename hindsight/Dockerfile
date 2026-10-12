@@ -45,14 +45,22 @@ WORKDIR /src
 RUN npm ci --ignore-scripts -w @vectorize-io/hindsight-client \
  && npm run build -w @vectorize-io/hindsight-client
 # Build the control-plane under the monorepo path its build:standalone expects.
-# Mirrors upstream docker/standalone/Dockerfile's cp-builder stage.
+# Mirrors upstream docker/standalone/Dockerfile's cp-builder stage, which (like
+# us) drops the lockfile, so deps float within package.json's ranges.
+# CP_DEP_PINS holds back releases newer than the pinned upstream build that
+# break it: @radix-ui/react-select 2.4.0 (2026-10-12) narrows onValueChange to
+# `string` and fails the v0.10.3 type check; upstream's image resolved 2.3.8.
+# Revisit (try dropping) on every HINDSIGHT_REF bump.
+ARG CP_DEP_PINS="dependencies.@radix-ui/react-select=2.3.8"
 WORKDIR /app/memory-poc/hindsight-control-plane
 RUN cp /src/hindsight-control-plane/package.json ./ \
  && sed -i '/"@vectorize-io\/hindsight-client":/d' package.json \
+ && npm pkg set ${CP_DEP_PINS} \
  && npm install
 RUN cp -a /src/hindsight-control-plane/. ./ \
  && rm -f package-lock.json \
  && sed -i '/"@vectorize-io\/hindsight-client":/d' package.json \
+ && npm pkg set ${CP_DEP_PINS} \
  && mkdir -p ./node_modules/@vectorize-io \
  && rm -rf ./node_modules/@vectorize-io/hindsight-client \
  && cp -a /src/hindsight-clients/typescript ./node_modules/@vectorize-io/hindsight-client
